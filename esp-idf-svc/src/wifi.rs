@@ -137,6 +137,20 @@ impl From<AuthMethod> for Newtype<wifi_auth_mode_t> {
             AuthMethod::WPA3Personal => wifi_auth_mode_t_WIFI_AUTH_WPA3_PSK,
             AuthMethod::WPA2WPA3Personal => wifi_auth_mode_t_WIFI_AUTH_WPA2_WPA3_PSK,
             AuthMethod::WAPIPersonal => wifi_auth_mode_t_WIFI_AUTH_WAPI_PSK,
+            #[cfg(esp_idf_version_at_least_5_4_0)]
+            AuthMethod::WPA3Enterprise => wifi_auth_mode_t_WIFI_AUTH_WPA3_ENTERPRISE,
+            #[cfg(esp_idf_version_at_least_5_4_0)]
+            AuthMethod::WPA2WPA3Enterprise => wifi_auth_mode_t_WIFI_AUTH_WPA2_WPA3_ENTERPRISE,
+            // Older ESP-IDF versions have no dedicated WPA3-Enterprise auth modes;
+            // WPA2-Enterprise is the closest (weaker) threshold they support
+            #[cfg(not(esp_idf_version_at_least_5_4_0))]
+            AuthMethod::WPA3Enterprise | AuthMethod::WPA2WPA3Enterprise => {
+                wifi_auth_mode_t_WIFI_AUTH_WPA2_ENTERPRISE
+            }
+            #[cfg(esp_idf_version_at_least_5_0_0)]
+            AuthMethod::WPA3Enterprise192 => wifi_auth_mode_t_WIFI_AUTH_WPA3_ENT_192,
+            #[cfg(not(esp_idf_version_at_least_5_0_0))]
+            AuthMethod::WPA3Enterprise192 => wifi_auth_mode_t_WIFI_AUTH_WPA2_ENTERPRISE,
         })
     }
 }
@@ -155,6 +169,14 @@ impl From<Newtype<wifi_auth_mode_t>> for Option<AuthMethod> {
             wifi_auth_mode_t_WIFI_AUTH_WPA3_PSK => Some(AuthMethod::WPA3Personal),
             wifi_auth_mode_t_WIFI_AUTH_WPA2_WPA3_PSK => Some(AuthMethod::WPA2WPA3Personal),
             wifi_auth_mode_t_WIFI_AUTH_WAPI_PSK => Some(AuthMethod::WAPIPersonal),
+            #[cfg(esp_idf_version_at_least_5_4_0)]
+            wifi_auth_mode_t_WIFI_AUTH_WPA3_ENTERPRISE => Some(AuthMethod::WPA3Enterprise),
+            #[cfg(esp_idf_version_at_least_5_4_0)]
+            wifi_auth_mode_t_WIFI_AUTH_WPA2_WPA3_ENTERPRISE => {
+                Some(AuthMethod::WPA2WPA3Enterprise)
+            }
+            #[cfg(esp_idf_version_at_least_5_0_0)]
+            wifi_auth_mode_t_WIFI_AUTH_WPA3_ENT_192 => Some(AuthMethod::WPA3Enterprise192),
             _ => None,
         }
     }
@@ -479,8 +501,9 @@ impl From<TtlsPhase2Method> for esp_eap_ttls_phase2_types {
 /// username and a password, while EAP-TLS uses a client certificate and its private key instead.
 /// With a CA certificate, the authentication server is validated.
 ///
-/// ESP-IDF copies the identity, the username and the password, but keeps referring to the
-/// certificates, the private key and its password, hence these have to be `'static`.
+/// ESP-IDF copies the identity, the username, the password and the domain name, but keeps
+/// referring to the certificates, the private key and its password, hence these have to be
+/// `'static`.
 #[cfg(any(
     esp_idf_version_patch_at_least_5_0_5,
     esp_idf_version_patch_at_least_5_1_2,
@@ -501,6 +524,11 @@ pub struct EnterpriseConfiguration<'a> {
     pub private_key_password: Option<&'static str>,
     /// The inner authentication method of EAP-TTLS; ESP-IDF's default if `None`
     pub ttls_phase2_method: Option<TtlsPhase2Method>,
+    /// Validate the authentication server against the default certificate bundle
+    /// (`CONFIG_MBEDTLS_CERTIFICATE_BUNDLE`), as an alternative to `ca_certificate`
+    pub use_default_cert_bundle: bool,
+    /// The expected domain name of the authentication server certificate
+    pub domain_name: Option<&'a str>,
 }
 
 #[cfg(any(
@@ -520,6 +548,8 @@ impl EnterpriseConfiguration<'_> {
             private_key: None,
             private_key_password: None,
             ttls_phase2_method: None,
+            use_default_cert_bundle: false,
+            domain_name: None,
         }
     }
 }
@@ -1681,6 +1711,18 @@ impl<'d> WifiDriver<'d> {
                 esp!(esp_eap_client_set_ttls_phase2_method(method.into()))?;
             }
 
+            if conf.use_default_cert_bundle {
+                esp!(esp_eap_client_use_default_cert_bundle(true))?;
+            }
+
+            if let Some(domain_name) = conf.domain_name {
+                // ESP-IDF limits the domain name to 255 characters
+                let mut buf = [0_u8; 256];
+                set_str(&mut buf, domain_name)?;
+
+                esp!(esp_eap_client_set_domain_name(buf.as_ptr() as *const _))?;
+            }
+
             esp!(esp_wifi_sta_enterprise_enable())
         }
     }
@@ -1712,6 +1754,8 @@ impl<'d> WifiDriver<'d> {
             esp_eap_client_clear_password();
             esp_eap_client_clear_ca_cert();
             esp_eap_client_clear_certificate_and_key();
+            esp_eap_client_use_default_cert_bundle(false);
+            esp_eap_client_set_domain_name(core::ptr::null());
         }
     }
 }
